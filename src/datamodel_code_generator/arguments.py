@@ -740,6 +740,12 @@ openapi_options.add_argument(
     action="store_true",
     default=None,
 )
+openapi_options.add_argument(
+    "--generate-requests-client",
+    help="Generate a sync requests HTTP client from OpenAPI operations",
+    action="store_true",
+    default=None,
+)
 
 # ======================================================================================
 # General options

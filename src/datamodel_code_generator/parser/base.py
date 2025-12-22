@@ -1033,6 +1033,18 @@ class Parser(ABC):
         """Parse the raw schema source. Must be implemented by subclasses."""
         raise NotImplementedError
 
+    def dump_client(self, models: list[DataModel]) -> str | None:
+        """Generate client code. Override in subclasses to generate API clients."""
+        return None
+
+    def get_extra_imports(self) -> list[Import]:
+        """Return extra imports needed by subclass-specific code (e.g., API client).
+
+        Override in subclasses to add imports for generated code like clients.
+        Called before imports are rendered to string.
+        """
+        return []
+
     @classmethod
     def _replace_model_in_list(
         cls,
@@ -2774,6 +2786,9 @@ class Parser(ABC):
 
         if ctx.models:
             if config.with_import:
+                # Add subclass-specific imports before rendering
+                for extra_import in self.get_extra_imports():
+                    self.imports.append(extra_import)
                 import_parts = [s for s in [future_imports_str, str(self.imports), str(ctx.imports)] if s]
                 result += [*import_parts, "\n"]
 
@@ -2792,6 +2807,11 @@ class Parser(ABC):
                 require_update_action_models,
                 use_deferred_annotations=config.use_deferred_annotations,
             )
+
+            # Hook for subclasses to generate additional code (e.g., API client)
+            client_code = self.dump_client(ctx.models)
+            if client_code:
+                result += ["\n\n", client_code]
 
         if not result and ctx.module_key in forwarder_map:
             internal_module, class_mappings = forwarder_map[ctx.module_key]

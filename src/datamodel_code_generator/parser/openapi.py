@@ -12,7 +12,7 @@ from contextlib import nullcontext
 from enum import Enum
 from pathlib import Path
 from re import Pattern
-from typing import TYPE_CHECKING, Any, ClassVar, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Any, ClassVar, Optional, TypedDict, TypeVar, Union
 from warnings import warn
 
 from pydantic import Field
@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
     from urllib.parse import ParseResult
 
+    from datamodel_code_generator.imports import Import
     from datamodel_code_generator.parser import DefaultPutDict
 
 
@@ -159,6 +160,13 @@ class Operation(BaseModel):
     requestBody: Optional[Union[ReferenceObject, RequestBodyObject]] = None  # noqa: N815, UP007, UP045
     responses: dict[Union[str, int], Union[ReferenceObject, ResponseObject]] = {}  # noqa: RUF012, UP007
     deprecated: bool = False
+
+
+class OperationTypes(TypedDict, total=False):
+    """Resolved DataTypes for an operation, used for client generation."""
+
+    response_data_types: dict[Union[str, int], DataType]  # noqa: UP007  # {200: DataType, 404: DataType}
+    request_body_data_type: Optional[DataType]  # noqa: UP045
 
 
 class ComponentsObject(BaseModel):
@@ -276,6 +284,7 @@ class OpenAPIParser(JsonSchemaParser):
         use_frozen_field: bool = False,
         use_default_factory_for_optional_nested_models: bool = False,
         use_status_code_in_response_name: bool = False,
+        generate_requests_client: bool = False,
     ) -> None:
         """Initialize the OpenAPI parser with extensive configuration options."""
         target_datetime_class = target_datetime_class or DatetimeClassType.Awaredatetime
@@ -377,6 +386,10 @@ class OpenAPIParser(JsonSchemaParser):
         self.open_api_scopes: list[OpenAPIScope] = openapi_scopes or [OpenAPIScope.Schemas]
         self.include_path_parameters: bool = include_path_parameters
         self.use_status_code_in_response_name: bool = use_status_code_in_response_name
+        self.generate_requests_client: bool = generate_requests_client
+        # Storage for client generation: dict[path][method] -> data
+        self.operations_by_path: dict[str, dict[str, Operation]] = defaultdict(dict)
+        self.operation_types_by_path: dict[str, dict[str, OperationTypes]] = defaultdict(dict)
         self._discriminator_schemas: dict[str, dict[str, Any]] = {}
         self._discriminator_subtypes: dict[str, list[str]] = defaultdict(list)
 
@@ -552,7 +565,12 @@ class OpenAPIParser(JsonSchemaParser):
                             raw_operation["parameters"] = item_parameters.copy()
                     if security is not None and "security" not in raw_operation:
                         raw_operation["security"] = security
-                    self.parse_operation(raw_operation, [*path, operation_name])
+                    self.parse_operation(
+                        raw_operation,
+                        [*path, operation_name],
+                        original_path=item_name,
+                        http_method=operation_name,
+                    )
 
     def parse_schema(
         self,
@@ -763,6 +781,9 @@ class OpenAPIParser(JsonSchemaParser):
         self,
         raw_operation: dict[str, Any],
         path: list[str],
+        *,
+        original_path: str | None = None,
+        http_method: str | None = None,
     ) -> None:
         """Parse an OpenAPI operation including parameters, request body, and responses."""
         operation = Operation.parse_obj(raw_operation)
@@ -783,18 +804,19 @@ class OpenAPIParser(JsonSchemaParser):
             operation.parameters,
             [*path, "parameters"],
         )
+        request_body_types: dict[str, DataType] = {}
         if operation.requestBody:
             if isinstance(operation.requestBody, ReferenceObject):
                 ref_model = self.get_ref_model(operation.requestBody.ref)
                 request_body = RequestBodyObject.parse_obj(ref_model)
             else:
                 request_body = operation.requestBody
-            self.parse_request_body(
+            request_body_types = self.parse_request_body(
                 name=self._get_model_name(path_name, method, suffix="Request"),
                 request_body=request_body,
                 path=[*path, "requestBody"],
             )
-        self.parse_responses(
+        response_types = self.parse_responses(
             name=self._get_model_name(path_name, method, suffix="Response"),
             responses=operation.responses,
             path=[*path, "responses"],
@@ -805,6 +827,31 @@ class OpenAPIParser(JsonSchemaParser):
                 tags=operation.tags,
                 path=[*path, "tags"],
             )
+        # Store for client generation
+        if self.generate_requests_client and original_path and http_method:
+            # Store operation in dict[path][method]
+            self.operations_by_path[original_path][http_method] = operation
+
+            # Build and store OperationTypes
+            op_types: OperationTypes = {}
+
+            # Get request body DataType (prefer application/json)
+            for content_type in ["application/json", *request_body_types.keys()]:
+                if content_type in request_body_types:
+                    op_types["request_body_data_type"] = request_body_types[content_type]
+                    break
+
+            # Get response DataTypes by status code
+            response_data_types: dict[str | int, DataType] = {}
+            for status_code, content_types in response_types.items():
+                for content_type in ["application/json", *content_types.keys()]:
+                    if content_type in content_types:
+                        response_data_types[status_code] = content_types[content_type]
+                        break
+            if response_data_types:
+                op_types["response_data_types"] = response_data_types
+
+            self.operation_types_by_path[original_path][http_method] = op_types
 
     def parse_raw(self) -> None:
         """Parse OpenAPI specification including schemas, paths, and operations."""
@@ -890,6 +937,111 @@ class OpenAPIParser(JsonSchemaParser):
                         )
 
         self._resolve_unparsed_json_pointer()
+
+    def get_extra_imports(self) -> list[Import]:
+        """Return extra imports needed for requests client code."""
+        if not self.generate_requests_client or not self.operations_by_path:
+            return []
+
+        from datamodel_code_generator.imports import (  # noqa: PLC0415
+            IMPORT_ANNOTATED,
+            IMPORT_CALLABLE,
+            IMPORT_LITERAL,
+            IMPORT_REQUESTS,
+            IMPORT_UNION,
+        )
+        from datamodel_code_generator.model.pydantic.imports import IMPORT_FIELD  # noqa: PLC0415
+
+        return [
+            IMPORT_LITERAL,
+            IMPORT_ANNOTATED,
+            IMPORT_UNION,
+            IMPORT_FIELD,
+            IMPORT_CALLABLE,
+            IMPORT_REQUESTS,
+        ]
+
+    def dump_client(self, models: list[DataModel]) -> str | None:
+        """Generate requests HTTP client code from collected operations."""
+        if not self.generate_requests_client or not self.operations_by_path:
+            return None
+
+        from datamodel_code_generator.model.base import get_template  # noqa: PLC0415
+
+        template = get_template(Path("RequestsClient.jinja2"))
+
+        # Build operation data for template
+        operations_data = []
+        for path, methods in self.operations_by_path.items():
+            for method, op in methods.items():
+                op_types = self.operation_types_by_path.get(path, {}).get(method, {})
+
+                # Get method name from operationId or path+method
+                method_name = op.operationId or self._make_method_name(path, method)
+
+                # Extract path parameters from path string
+                path_params = []
+                for match in re.finditer(r"\{(\w+)\}", path):
+                    path_params.append({"name": match.group(1), "type": "str"})
+
+                # Extract query parameters
+                query_params = []
+                for param in op.parameters:
+                    if isinstance(param, ParameterObject) and param.in_ == ParameterLocation.query:
+                        param_type = "str"
+                        if param.schema_:
+                            param_type = self._get_python_type_from_schema(param.schema_)
+                        query_params.append({
+                            "name": param.name,
+                            "type": param_type,
+                            "required": param.required,
+                        })
+
+                # Extract type hints from stored DataTypes
+                response_types = {
+                    str(status_code): dt.type_hint
+                    for status_code, dt in op_types.get("response_data_types", {}).items()
+                }
+                request_body_dt = op_types.get("request_body_data_type")
+                request_body_type = request_body_dt.type_hint if request_body_dt else None
+
+                operations_data.append({
+                    "path": path,
+                    "method": method,
+                    "method_name": method_name,
+                    "operationId": op.operationId,
+                    "summary": op.summary,
+                    "description": op.description,
+                    "path_params": path_params,
+                    "query_params": query_params,
+                    "request_body_type": request_body_type,
+                    "response_types": response_types,
+                    "deprecated": op.deprecated,
+                })
+
+        return template.render(operations=operations_data)
+
+    def _make_method_name(self, path: str, method: str) -> str:
+        """Generate a method name from path and HTTP method."""
+        # Remove leading slash and convert to snake_case
+        clean_path = path.strip("/").replace("{", "").replace("}", "").replace("/", "_").replace("-", "_")
+        return f"{method}_{clean_path}" if clean_path else method
+
+    def _get_python_type_from_schema(self, schema: JsonSchemaObject) -> str:
+        """Get Python type string from JSON schema."""
+        type_mapping = {
+            "string": "str",
+            "integer": "int",
+            "number": "float",
+            "boolean": "bool",
+            "array": "list",
+            "object": "dict",
+        }
+        if schema.type:
+            if isinstance(schema.type, list):
+                return type_mapping.get(schema.type[0], "str")
+            return type_mapping.get(schema.type, "str")
+        return "str"
 
     def _collect_discriminator_schemas(self) -> None:
         """Collect schemas with discriminators but no oneOf/anyOf, and find their subtypes."""

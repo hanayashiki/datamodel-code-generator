@@ -1,0 +1,97 @@
+# Response models for API client
+
+
+class DefaultResponse(BaseModel):
+    """Default response for unexpected status codes."""
+    status_code: int
+    body: dict | list | str | None
+    raw_body: str
+
+{% for op in operations %}
+{% set class_prefix = op.method_name | replace('_', ' ') | title | replace(' ', '') %}
+{% for status_code, response_type in op.response_types.items() %}
+{% if status_code != 'default' %}
+
+
+class {{ class_prefix }}Response{{ status_code }}(BaseModel):
+    status_code: Literal[{{ status_code }}] = {{ status_code }}
+    body: {{ response_type }}
+    raw_body: str
+{% endif %}
+{% endfor %}
+
+
+{{ class_prefix }}Response = Annotated[
+    Union[{% for status_code in op.response_types.keys() if status_code != 'default' %}{{ class_prefix }}Response{{ status_code }}{% if not loop.last %}, {% endif %}{% endfor %}{% if op.response_types %}, {% endif %}DefaultResponse],
+    Field(discriminator="status_code")
+]
+{% endfor %}
+
+
+class APIClient:
+    def __init__(
+        self,
+        base_url: str,
+        get_headers: Callable[[], dict[str, str]] | None = None
+    ):
+        self.base_url = base_url.rstrip("/")
+        self._get_headers = get_headers or (lambda: {})
+        self._session = requests.Session()
+{% for op in operations %}
+{% set class_prefix = op.method_name | replace('_', ' ') | title | replace(' ', '') %}
+
+    def {{ op.method_name }}(
+        self,
+{% for param in op.path_params %}
+        {{ param.name }}: {{ param.type }},
+{% endfor %}
+{% if op.request_body_type %}
+        body: {{ op.request_body_type }},
+{% endif %}
+{% for param in op.query_params %}
+        {{ param.name }}: {{ param.type }}{% if not param.required %} | None = None{% endif %},
+{% endfor %}
+    ) -> {{ class_prefix }}Response:
+{% if op.summary %}
+        """{{ op.summary }}"""
+{% endif %}
+        response = self._session.{{ op.method }}(
+            f"{self.base_url}{{ op.path }}",
+            headers=self._get_headers(),
+{% if op.request_body_type %}
+            json=body.model_dump(mode="json", by_alias=True, exclude_none=True),
+{% endif %}
+{% if op.query_params %}
+            params={k: v for k, v in {
+{% for param in op.query_params %}
+                "{{ param.name }}": {{ param.name }},
+{% endfor %}
+            }.items() if v is not None},
+{% endif %}
+        )
+        raw_body = response.text
+{% set has_specific_responses = op.response_types.keys() | reject('equalto', 'default') | list | length > 0 %}
+{% for status_code, response_type in op.response_types.items() %}
+{% if status_code != 'default' %}
+        {% if loop.first %}if{% else %}elif{% endif %} response.status_code == {{ status_code }}:
+            return {{ class_prefix }}Response{{ status_code }}(
+                body=response.json(),
+                raw_body=raw_body,
+            )
+{% endif %}
+{% endfor %}
+{% if has_specific_responses %}
+        else:
+{% else %}
+        if True:  # No specific status codes defined
+{% endif %}
+            try:
+                body_data = response.json()
+            except Exception:
+                body_data = response.text
+            return DefaultResponse(
+                status_code=response.status_code,
+                body=body_data,
+                raw_body=raw_body,
+            )
+{% endfor %}

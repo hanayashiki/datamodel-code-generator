@@ -467,6 +467,7 @@ class Config(BaseModel):
     type_mappings: Optional[list[str]] = None  # noqa: UP045
     read_only_write_only_model_type: Optional[ReadOnlyWriteOnlyModelType] = None  # noqa: UP045
     use_status_code_in_response_name: bool = False
+    generate_requests_client: bool = False
     all_exports_scope: Optional[AllExportsScope] = None  # noqa: UP045
     all_exports_collision_strategy: Optional[AllExportsCollisionStrategy] = None  # noqa: UP045
     module_split_mode: Optional[ModuleSplitMode] = None  # noqa: UP045
@@ -773,6 +774,7 @@ def run_generate_from_config(  # noqa: PLR0913, PLR0917
         type_mappings=config.type_mappings,
         read_only_write_only_model_type=config.read_only_write_only_model_type,
         use_status_code_in_response_name=config.use_status_code_in_response_name,
+        generate_requests_client=config.generate_requests_client,
         all_exports_scope=config.all_exports_scope,
         all_exports_collision_strategy=config.all_exports_collision_strategy,
         module_split_mode=config.module_split_mode,

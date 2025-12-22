@@ -481,6 +481,7 @@ def generate(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
     type_mappings: list[str] | None = None,
     read_only_write_only_model_type: ReadOnlyWriteOnlyModelType | None = None,
     use_status_code_in_response_name: bool = False,
+    generate_requests_client: bool = False,
     all_exports_scope: AllExportsScope | None = None,
     all_exports_collision_strategy: AllExportsCollisionStrategy | None = None,
     module_split_mode: ModuleSplitMode | None = None,
@@ -542,6 +543,7 @@ def generate(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
         kwargs["openapi_scopes"] = openapi_scopes
         kwargs["include_path_parameters"] = include_path_parameters
         kwargs["use_status_code_in_response_name"] = use_status_code_in_response_name
+        kwargs["generate_requests_client"] = generate_requests_client
     elif input_file_type == InputFileType.GraphQL:
         from datamodel_code_generator.parser.graphql import GraphQLParser  # noqa: PLC0415
 
