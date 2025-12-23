@@ -1,11 +1,16 @@
 # Response models for API client
 
 
-class DefaultResponse(BaseModel):
-    """Default response for unexpected status codes."""
-    status_code: int
-    body: dict | list | str | None
+class ResponseBase(BaseModel):
+    """Base class for all API responses."""
+    raw_status_code: int
     raw_body: str
+
+
+class DefaultResponse(ResponseBase):
+    """Default response for unexpected status codes."""
+    checked_status: None = None
+    body: dict | list | str | None
 
 {% for op in operations %}
 {% set class_prefix = op.method_name | replace('_', ' ') | title | replace(' ', '') %}
@@ -13,17 +18,16 @@ class DefaultResponse(BaseModel):
 {% if status_code != 'default' %}
 
 
-class {{ class_prefix }}Response{{ status_code }}(BaseModel):
-    status_code: Literal[{{ status_code }}] = {{ status_code }}
+class {{ class_prefix }}Response{{ status_code }}(ResponseBase):
+    checked_status: Literal[{{ status_code }}] = {{ status_code }}
     body: {{ response_type }}
-    raw_body: str
 {% endif %}
 {% endfor %}
 
 
 {{ class_prefix }}Response = Annotated[
     Union[{% for status_code in op.response_types.keys() if status_code != 'default' %}{{ class_prefix }}Response{{ status_code }}{% if not loop.last %}, {% endif %}{% endfor %}{% if op.response_types %}, {% endif %}DefaultResponse],
-    Field(discriminator="status_code")
+    Field(discriminator="checked_status")
 ]
 {% endfor %}
 
@@ -59,7 +63,7 @@ class APIClient:
             f"{self.base_url}{{ op.path }}",
             headers=self._get_headers(),
 {% if op.request_body_type %}
-            json=body.model_dump(mode="json", by_alias=True, exclude_none=True),
+            json=body.model_dump(mode="json", by_alias=True, exclude_none=False),
 {% endif %}
 {% if op.query_params %}
             params={k: v for k, v in {
@@ -75,6 +79,7 @@ class APIClient:
 {% if status_code != 'default' %}
         {% if loop.first %}if{% else %}elif{% endif %} response.status_code == {{ status_code }}:
             return {{ class_prefix }}Response{{ status_code }}(
+                raw_status_code=response.status_code,
                 body=response.json(),
                 raw_body=raw_body,
             )
@@ -90,7 +95,7 @@ class APIClient:
             except Exception:
                 body_data = response.text
             return DefaultResponse(
-                status_code=response.status_code,
+                raw_status_code=response.status_code,
                 body=body_data,
                 raw_body=raw_body,
             )
